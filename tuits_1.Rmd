@@ -1,0 +1,512 @@
+---
+title: "Twitter Analysis sobre Amnistía Internacional"
+author: "Sebastian Varela- Geronimo Tutusaus- Julian Tutusaus"
+date: '2021-10-19'
+output:
+  html_document:
+    code_folding: show
+    theme:
+      color-contrast-warnings: no
+      bg: '#202123'
+      fg: '#B8BCC2'
+      primary: '#EA80FC'
+      secondary: '#00DAC6'
+      base_font:
+        google: Prompt
+      heading_font:
+        google: Proza Libre
+  pdf_document: default
+  word_document: default
+---
+
+```{r setup, include=FALSE}
+if (requireNamespace("thematic")) 
+  thematic::thematic_rmd(font = "auto")
+```
+
+## Importación de archivos
+
+```{r, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(tidytext)
+```
+
+
+```{r, message=FALSE, warning=FALSE, eval=FALSE}
+#loop para importar y joinear muchos archivos
+
+folderfiles <- list.files(path = "C:/Users/Usuario/Desktop/Seba/proyectos2021/tuiter_gero/data_tuits",
+                          pattern = "\\.csv$",33
+                          full.names = TRUE)
+
+tuits <- folderfiles %>% 
+    set_names() %>% 
+    map_dfr(.f = read_delim,
+            delim = ",",
+            .id = "file_name", show_col_types = FALSE)  #show_col_types = FALSE aquieta un mensaje
+```
+
+
+```{r, warning=FALSE, message=FALSE}
+library(readr)
+tuits <- read_csv("tuits_amnistia.csv", show_col_types = FALSE)
+```
+
+
+## Data wrangling
+
+Generar fecha:
+```{r, warning=FALSE}
+fecha <- tuits %>%
+separate(created_at, into = c("a", "b","c","d","e","f","g", "h")) %>% 
+  select(id, a, b,c,d,e,f,g,h) %>% 
+  select(id, c, b, h) %>% 
+  unite(fecha, c,b,h,sep = "") 
+
+fecha$fecha <- lubridate::dmy(fecha$fecha)
+
+tuits <- tuits %>% 
+  left_join(fecha) 
+```
+```{r}
+tuits %>% 
+  count(user.name)
+```
+hay un caracter emoji en Brasil... voy a borrar de la string los caracteres no alfanuméricos de la variable:
+
+```{r}
+tuits$user.name <- str_replace_all(tuits$user.name, "[^[:alnum:]]", "") 
+```
+
+
+```{r}
+tuits <- tuits %>%
+mutate(oficina = fct_recode(user.name,
+"Chile" = "AmnistíaChile",
+"México" = "AmnistíaIntMéxico",
+"Américas" = "AmnistíaInternacionalAméricas",
+"Argentina"  = "AmnistíaInternacionalArgentina",
+"Perú"  = "AmnistíaInternacionalPerú",
+"Brasil" = "AnistiaInternacionalBrasil",
+)) 
+  
+```
+
+```{r}
+tuits %>% 
+  count(oficina)
+```
+
+Omitir filas con perdidos en todas las columnas:
+
+```{r}
+tuits <- tuits %>% 
+  drop_na(oficina)
+
+rm(fecha)
+```
+
+
+## Time series por oficina
+
+```{r, fig.width=8}
+ggplot(tuits, aes(x = fecha, fill = oficina)) +
+geom_histogram(position = "identity", bins = 20, show.legend = FALSE) +
+facet_wrap(~oficina, ncol = 1) +
+ scale_y_continuous(expand = c(0,0)) +
+    labs(y = NULL,
+         x = NULL,
+         title = "Tweets por oficina",
+         subtitle = "Periodo: 2018-06-06 al 2021-09-13")
+```
+
+## TF-IDF
+
+El estadístico **tf-idf** (term frequency times inverse document frequency) es un índice para identificar términos que son especialmente importantes o distintivos en un determinado documento en una colección o corpus de documentos. En este caso identificar términos que son característicos de una oficina en comparación con otras.
+
+```{r}
+# mis stop_words en castellano y portugues
+mipropio_stop_words <- read_csv("mipropio_stop_words", show_col_types = FALSE) 
+```
+
+```{r}
+#tokenización 1
+
+
+remove_reg <- "&amp;|&lt;|&gt;"  #remueve caracteres como & y otros
+
+
+tidy_tuits <- tuits %>% 
+  filter(!str_detect(text, "^RT")) %>%  #remover re tuits
+  mutate(text = str_remove_all(text, remove_reg)) %>%
+  unnest_tokens(word, text, token = "tweets") %>%  #tweets tokenizer
+  filter(!word %in% mipropio_stop_words$word,
+         !word %in% str_remove_all(stop_words$word, "'"),
+         str_detect(word, "[a-z]"))
+```
+Cabe resaltar que arriba se elimimaron los re tuits.
+
+ahora sí, el tf-idf statistic:
+
+```{r}
+tf_idf <- tidy_tuits  %>%
+count(oficina, word, sort = TRUE)
+```
+
+La función bind_tf_idf() del tidytext package takes a tidy text dataset as input with one row per token (term), per document:
+
+```{r}
+tf_idf <- tf_idf %>% 
+bind_tf_idf(word, oficina, n)  #bind_tf_idf()
+tf_idf
+```
+Notar que los cuando *idf* y por ende los *tf-idf* son cero, dichas palabras son extremadamente comunes.
+
+Se grafican los resultados. Es conveniente usar en el chunk la función reorder_within(), véase https://juliasilge.com/blog/reorder-within/
+
+```{r, fig.width=10}
+tf_idf %>%
+    group_by(oficina) %>%
+    top_n(10, tf_idf) %>%
+    ungroup %>%
+    mutate(oficina = as.factor(oficina),
+           word = reorder_within(word, tf_idf, oficina)) %>%
+    ggplot(aes(word, tf_idf, fill = oficina)) +
+    geom_col(show.legend = FALSE) +
+    facet_wrap(~oficina, scales = "free") +
+    coord_flip() +
+    scale_x_reordered() +
+    scale_y_continuous(expand = c(0,0)) +
+    labs(y = NULL,
+         x = NULL,
+         title = "Palabras con mayor tf_idf por oficina",
+         subtitle = "Data de twitter del 2018-06-06 al 2021-09-13" )
+```
+
+### Preparación de datos para topic modeling 
+
+```{r}
+tuits <- tuits %>% 
+  rename(Id_unico =`Id unico`)
+```
+
+```{r}
+tuits %>% 
+  count(Id_unico) %>% 
+  arrange(desc(n))
+```
+Hay duplicados, se eliminan:
+
+```{r}
+tuits <- tuits %>% 
+  distinct(Id_unico, .keep_all = TRUE)
+```
+
+Ahora ver si hay duplicados específicamente respecto del texto del tuit:
+```{r}
+tuits_duplicados <- tuits %>% #un dataset con las casos de filas duplicadas en la variable text
+group_by(text) %>% 
+filter(n()>1) 
+```
+
+Sí, son 368 tuits duplicados... se eliminan:
+
+```{r}
+tuits <- anti_join(tuits, tuits_duplicados, by = "text")
+```
+
+```{r}
+rm(tf_idf, tuits_duplicados)
+```
+
+
+Seleccionar variables para el topic modeling
+```{r}
+df_topic <- tuits 
+         
+df_topic <- df_topic %>% 
+  select(Id_unico, text)
+```
+
+
+se debe llegar a un dataset con id y word (tokenizada):
+
+```{r}
+#tokenización 2
+
+remove_reg <- "&amp;|&lt;|&gt;"  #remueve caracteres (& y otras)
+
+
+df_topic <- df_topic %>% 
+  filter(!str_detect(text, "^RT")) %>%  #remover re tuits
+  mutate(text = str_remove_all(text, remove_reg)) %>%
+  unnest_tokens(word, text, token = "tweets") %>%  #tweets tokenizer
+  filter(!word %in% mipropio_stop_words$word,
+         !word %in% str_remove_all(stop_words$word, "'"),
+         str_detect(word, "[a-z]")) 
+```
+Acá el número de Ids vajo a 15.856 por re tuits (y duplicados)
+
+```{r}
+df_topic  %>% 
+  count(Id_unico)
+```
+
+cambio el formato del dataset para transformar a matrix
+```{r}
+word_counts <- df_topic %>% 
+  count(Id_unico, word, sort = TRUE)
+word_counts
+```
+
+### Document Term Matrix
+
+Se transforma la matriz del chunk anterior en una document-term matrix. En esta matriz:
+
+* cada fila representa un documento (tuit en este caso)
+
+* cada columna representa un término
+
+* cada valor el número de apariciones de ese término en el documento
+
+A este tipo de matrices se les denomina *sparse matrix* (matriz dispersa) porque la mayor parte de sus valores son 0 (términos que no aparecen en documentos). Muchos algotitmos esperan este formato más eficiente como insumo, es el caso de Latent Dirichlet allocation.
+
+```{r, message=FALSE, warning=FALSE}
+library(tm)
+
+desc_dtm <- word_counts %>%
+cast_dtm(Id_unico, word, n)  #converting to a DocumentTermMatrix
+desc_dtm
+```
+Explorar la extensión de los tuits:
+```{r}
+tuits$extension <-nchar(tuits$text)
+```
+
+```{r, fig.width=5}
+ggplot(tuits) +
+ aes(x = extension) +
+ geom_histogram(bins = 30L, fill = "#EF562D") +
+ labs(title = "Extensión de los tweets", 
+ subtitle = "cantidad de caracteres",
+ y = "frecuencia",
+ x = "") 
+
+```
+
+## Topic modeling
+
+Se utiliza la técnica de topic modeling para la detección de tópicos y clasificación de los tweets. La técnica se aplica mediante el algoritmo Latent Dirichlet allocation (LDA)
+
+### Solución k=2
+
+Solución con dos tópicos
+
+```{r}
+library(topicmodels)
+# be aware that running this model is time intensive
+topicos_lda <- LDA(desc_dtm, k = 2, control = list(seed = 24))
+topicos_lda
+```
+#### Interpretación
+
+```{r}
+#tidy() turns a document-term matrix into a tidy data frame.
+tidy_topicos_lda <- tidy(topicos_lda)
+tidy_topicos_lda
+```
+
+La columna β (coeficiente beta) indica la probabilidad de pertenencia de cada término a cada tópico. Se extraen a continuación los 10 términos más importantes para cada uno de los dos tópicos:
+
+```{r}
+top_terms <- tidy_topicos_lda %>%
+group_by(topic) %>%
+top_n(10, beta) %>%
+ungroup() %>%
+arrange(topic, -beta)
+```
+
+```{r}
+top_terms %>%
+mutate(term = reorder(term, beta)) %>%
+group_by(topic, term) %>%
+arrange(desc(beta)) %>%
+ungroup() %>%
+mutate(term = factor(paste(term, topic, sep = "__"),
+levels = rev(paste(term, topic, sep = "__")))) %>%
+ggplot(aes(term, beta, fill = as.factor(topic))) +
+geom_col(show.legend = FALSE) +
+coord_flip() +
+scale_x_discrete(labels = function(x) gsub("__.+$", "", x)) +
+labs(title = "10 términos top en cada tópico",
+x = NULL, y = expression(beta),
+subtitle = "Latent Dirichlet allocation (LDA)") +
+facet_wrap(~ topic, ncol = 5, scales = "free")
+```
+
+No sale mucho, el primero parece más relacionado con temas de gobierno y en el segundo aparecen cuestiones de género y justicia. Pero no parece una buena solución.
+
+### Cantidad de tópicos: tuning
+
+Usando el paquete *ldatuning* es posible calcular un conjunto de métricas que pueden ser de utilidad para ayudar a definir el número óptimo de tópicos:
+
+```{r}
+#puede ser computer intensive
+
+library(topicmodels)
+library(ldatuning)
+result <- FindTopicsNumber(
+  desc_dtm,
+  topics = seq(from = 2, to = 15, by = 1),
+  metrics = c("Griffiths2004", "CaoJuan2009", "Arun2010", "Deveaud2014"),
+  method = "Gibbs",
+  control = list(seed = 77),
+  mc.cores = 2L,
+  verbose = TRUE
+)
+```
+
+```{r}
+result
+```
+
+```{r}
+FindTopicsNumber_plot(result)
+```
+
+La finalidad de este procedimiento es definir el número optimo de tópicos. Los dos indices de arriba (Arun y Cao) indican mejores soluciones cuando el valor es mínimo y los dos de abajo (Deveaud y Griffiths) cuando es máximo. Los gráficos se interpretan de manera similar al *scree plot* de un análisis de factorial.
+
+Se observan resultados inconsistentes entre las distintas métricas, lo cual probablemente se deba a que el dataset no representa un buen insumo para la utilización del algoritmo LDA.
+
+
+### Solución k=5
+
+Solución con cinco tópicos
+
+```{r}
+topicos_lda <- LDA(desc_dtm, k = 5, control = list(seed = 24))
+topicos_lda
+```
+
+#### Interpretación
+
+```{r}
+#tidy() turns a document-term matrix into a tidy data frame.
+tidy_topicos_lda <- tidy(topicos_lda)
+tidy_topicos_lda
+```
+
+```{r}
+top_terms <- tidy_topicos_lda %>%
+group_by(topic) %>%
+top_n(10, beta) %>%
+ungroup() %>%
+arrange(topic, -beta)
+```
+
+```{r}
+top_terms %>%
+mutate(term = reorder(term, beta)) %>%
+group_by(topic, term) %>%
+arrange(desc(beta)) %>%
+ungroup() %>%
+mutate(term = factor(paste(term, topic, sep = "__"),
+levels = rev(paste(term, topic, sep = "__")))) %>%
+ggplot(aes(term, beta, fill = as.factor(topic))) +
+geom_col(show.legend = FALSE) +
+coord_flip() +
+scale_x_discrete(labels = function(x) gsub("__.+$", "", x)) +
+labs(title = "10 términos top en cada tópico",
+x = NULL, y = expression(beta),
+subtitle = "Latent Dirichlet allocation (LDA)") +
+facet_wrap(~ topic, ncol = 3, scales = "free")
+```
+
+### Solución k=16
+
+Solución con 16 tópicos
+
+```{r}
+topicos_lda <- LDA(desc_dtm, k = 16, control = list(seed = 24))
+topicos_lda
+```
+
+#### Interpretación
+
+```{r}
+#tidy() turns a document-term matrix into a tidy data frame.
+tidy_topicos_lda <- tidy(topicos_lda)
+tidy_topicos_lda
+```
+
+```{r}
+top_terms <- tidy_topicos_lda %>%
+group_by(topic) %>%
+top_n(10, beta) %>%
+ungroup() %>%
+arrange(topic, -beta)
+```
+
+
+```{r, fig.width= 7, fig.asp=1}
+top_terms %>%
+mutate(term = reorder(term, beta)) %>%
+group_by(topic, term) %>%
+arrange(desc(beta)) %>%
+ungroup() %>%
+mutate(term = factor(paste(term, topic, sep = "__"),
+levels = rev(paste(term, topic, sep = "__")))) %>%
+ggplot(aes(term, beta, fill = as.factor(topic))) +
+geom_col(show.legend = FALSE) +
+coord_flip() +
+scale_x_discrete(labels = function(x) gsub("__.+$", "", x)) +
+scale_y_continuous(labels = NULL) +
+labs(title = "10 términos top en cada tópico",
+x = NULL, y = expression(beta),
+subtitle = "Latent Dirichlet allocation (LDA)") +
+facet_wrap(~ topic, ncol = 4, scales = "free")
+```
+
+
+#### Asignación de documentos a tópicos
+
+Se pueden examinar las probabilidades de los documentos de pertenecer a cada tópico, mediante el coficiente *gamma*. Se toma la solución de 16 tópicos:
+
+```{r}
+documents_topic <- tidy(topicos_lda, matrix = "gamma")
+documents_topic
+```
+Cada uno de estos valores indica la proporción estimada de palabras del documento que fueron generadas por ese tópico. Se observan valores bajos, lo cuál indica que el modelo no es sarisfactorio. A continuación se asignan los documentos (tweets aquí) a los tópicos.
+
+```{r}
+documents_topic_1 <- documents_topic %>%
+  group_by(document) %>%
+  slice_max(gamma) %>%
+  ungroup() %>%
+  select(- gamma)
+documents_topic_1 
+```
+Cabe recordar que hay 15.903 filas y no 18.824 como en el dataset original porque se eliminaron los retuits y los duplicados. Se pega la variable *document* al dataset original:
+
+```{r}
+dataset_final_tm <- documents_topic_1 %>%
+  left_join(tuits, by= c("document" = "Id_unico"))
+```
+
+#### Guardar dataset:
+
+```{r, eval=FALSE}
+write_csv(dataset_final_tm, "dataset_final_tm.csv")
+```
+
+
+
+#### Fuentes adicionales de consulta:
+
+
+* https://content-analysis-with-r.com/6-topic_models.html
+
+* https://neoacademic.com/2018/04/27/siop-2018-an-analysis-using-natural-language-processing/
+
+* https://www.tidytextmining.com/
+
